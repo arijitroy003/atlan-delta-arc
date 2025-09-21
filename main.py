@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 CACHE_EXPIRY_HOURS = 24
 POSTGRES_CACHE_FILE = "postgres_assets_cache.json"
 SNOWFLAKE_CACHE_FILE = "snowflake_assets_cache.json"
+ATLAN_BASE_URL = os.getenv("ATLAN_BASE_URL", "https://tech-challenge.atlan.com")
+ATLAN_API_TOKEN = os.getenv("ATLAN_API_TOKEN")
+
+client = AtlanClient(
+    base_url=ATLAN_BASE_URL,
+    api_key=ATLAN_API_TOKEN
+)
 
 
 def clear_all_cache():
@@ -63,13 +70,197 @@ def get_cache_status():
         else:
             logger.info(f"{name} cache: 📁 Not found")
 
-ATLAN_BASE_URL = os.getenv("ATLAN_BASE_URL", "https://tech-challenge.atlan.com")
-ATLAN_API_TOKEN = os.getenv("ATLAN_API_TOKEN")
 
-client = AtlanClient(
-    base_url=ATLAN_BASE_URL,
-    api_key=ATLAN_API_TOKEN
-)
+def list_s3_bucket_objects(bucket_name: str) -> List[str]:
+    """
+    List objects in a public S3 bucket and return their keys
+    """
+    try:
+        import boto3
+        from botocore import UNSIGNED
+        from botocore.client import Config
+
+        # Create S3 client for public bucket access
+        s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+
+        # List objects in the specified bucket
+        response = s3.list_objects_v2(Bucket=bucket_name)
+        objects = response.get('Contents', [])
+        logger.info(f"📦 Found {len(objects)} objects in S3 bucket '{bucket_name}':")
+
+        object_keys = []
+        for obj in objects:
+            logger.info(f"  📄 {obj['Key']} (Size: {obj['Size']} bytes, Modified: {obj['LastModified']})")
+            object_keys.append(obj['Key'])
+
+        return object_keys
+
+    except Exception as e:
+        logger.error(f"❌ Error listing S3 objects: {e}")
+        return []
+
+
+def integration_with_S3(bucket_name: str = "atlan-tech-challenge", bucket_arn: str = "arn:aws:s3:::atlan-tech-challenge", prefix: str = "2025/csa-tech-challenge-ary/"):
+    """
+    Complete S3 integration workflow: setup connection, register bucket, and create objects
+    """
+    logger.info("🚀 Starting S3 integration workflow...")
+
+    # ------------- setup s3 connection ---------------
+    logger.info("🔍 Setting up S3 connection...")
+    connection_name = "aws-s3-connection-ary-test"
+
+    # Check if connection already exists
+    existing_connection_qn = get_connection_qualified_name(
+        connection_name=connection_name,
+        connection_type=AtlanConnectorType.S3
+    )
+
+    if existing_connection_qn:
+        logger.info(f"✅ S3 connection already exists: {existing_connection_qn}")
+        connection_qualified_name = existing_connection_qn
+    else:
+        logger.info("🔧 Creating new S3 connection...")
+        try:
+            connection = Connection.creator(
+                client=client,
+                name=connection_name,
+                connector_type=AtlanConnectorType.S3,
+                admin_users=["arijitroy003"],
+            )
+            response = client.asset.save(connection)
+            connection_qualified_name = response.assets_created(asset_type=Connection)[0].qualified_name
+            logger.info(f"✅ S3 connection created successfully: {connection_qualified_name}")
+        except Exception as e:
+            logger.error(f"❌ Error creating S3 connection: {e}")
+            return None
+
+    # ------------- register s3 bucket ---------------
+    logger.info("🔍 Checking if S3 bucket already exists...")
+
+    search_request = (
+        FluentSearch()
+        .where(Asset.TYPE_NAME.eq("S3Bucket"))
+        .where(S3Bucket.AWS_ARN.eq(bucket_arn))
+        .include_on_results(Asset.QUALIFIED_NAME)
+        .include_on_results(Asset.NAME)
+        .page_size(1)
+    ).to_request()
+
+    search_response = client.asset.search(search_request)
+    existing_buckets = list(search_response)
+
+    if existing_buckets:
+        bucket_qualified_name = existing_buckets[0].qualified_name
+        logger.info(f"✅ S3 bucket already exists: {bucket_qualified_name}")
+    else:
+        logger.info("🔧 Creating new S3 bucket...")
+        s3bucket = S3Bucket.creator(
+            name=f"{bucket_name}-ary-test",
+            connection_qualified_name=connection_qualified_name,
+            aws_arn=bucket_arn
+        )
+        s3bucket.s3_object_count = 8  # Based on the 8 CSV files we found
+        response = client.asset.save(s3bucket)
+        bucket_qualified_name = response.assets_created(asset_type=S3Bucket)[0].qualified_name
+        logger.info(f"✅ S3 bucket created successfully: {bucket_qualified_name}")
+
+    # ------------- register s3 objects with ary prefix ---------------
+    logger.info("🔍 Getting list of files from S3 bucket...")
+
+    # Get actual files from S3 bucket using boto3
+    import boto3
+    from botocore import UNSIGNED
+    from botocore.client import Config
+
+    s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+    response = s3.list_objects_v2(Bucket=bucket_name)
+    s3_filenames = [obj['Key'] for obj in response.get('Contents', [])]
+    logger.info(f"📦 Found {len(s3_filenames)} files in S3 bucket: {s3_filenames}")
+
+    # Check if S3 objects already exist in Atlan
+    logger.info("🔍 Checking if S3 objects already exist in Atlan...")
+    list_of_objects = []
+    search_request = (
+        FluentSearch()
+        .where(Asset.TYPE_NAME.eq("S3Object"))
+        .where(S3Object.S3BUCKET_QUALIFIED_NAME.eq(bucket_qualified_name))
+        .include_on_results(Asset.QUALIFIED_NAME)
+        .include_on_results(Asset.NAME)
+        .page_size(50)  # Get more objects to check all files
+    ).to_request()
+
+    search_response = client.asset.search(search_request)
+    existing_objects = list(search_response)
+    existing_object_names = [obj.name for obj in existing_objects]
+
+    logger.info(f"📋 Found {len(existing_objects)} existing S3 objects in Atlan: {existing_object_names}")
+
+    # Compare S3 files with existing Atlan objects and create missing ones
+    missing_files = [f for f in s3_filenames if f not in existing_object_names]
+
+    if missing_files:
+        logger.info(f"🔧 Creating {len(missing_files)} missing S3 objects: {missing_files}")
+        for file_name in missing_files:
+            try:
+                s3_object = S3Object.creator(
+                    name=file_name,
+                    connection_qualified_name=connection_qualified_name,
+                    s3_bucket_qualified_name=bucket_qualified_name
+                )
+                response = client.asset.save(s3_object)
+                saved_object = response.assets_created(asset_type=S3Object)[0]
+                list_of_objects.append(saved_object)
+                logger.info(f"✅ Created S3 object: {file_name}")
+            except Exception as e:
+                logger.error(f"❌ Error creating S3 object {file_name}: {e}")
+
+    # Add existing objects to the list
+    list_of_objects.extend(existing_objects)
+    logger.info(f"📄 Final list_of_objects contains {len(list_of_objects)} S3 objects")
+
+    # Create S3 objects with prefix
+    created_s3_objects = []
+    for list_of_object in list_of_objects:
+        try:
+            s3object = S3Object.creator_with_prefix(
+                name=list_of_object.name,
+                connection_qualified_name=connection_qualified_name,
+                prefix=prefix,
+                s3_bucket_name=bucket_name,
+                s3_bucket_qualified_name=bucket_qualified_name,
+            )
+            response = client.asset.save(s3object)
+
+            # Extract qualified name from response
+            created_objects = response.assets_created(asset_type=S3Object)
+            updated_objects = response.assets_updated(asset_type=S3Object)
+
+            if created_objects:
+                created_object = created_objects[0]
+                logger.info(f"✅ Created S3 object: {list_of_object.name}")
+                logger.info(f"--📋 Qualified Name: {created_object.qualified_name}")
+                created_s3_objects.append(created_object)
+            elif updated_objects:
+                updated_object = updated_objects[0]
+                logger.info(f"🔄 Updated S3 object: {list_of_object.name}")
+                logger.info(f"--📋 Qualified Name: {updated_object.qualified_name}")
+                created_s3_objects.append(updated_object)
+            else:
+                logger.info(f"✅ Processed S3 object: {list_of_object.name}")
+                logger.info(f"--📋 No objects created or updated")
+        except Exception as e:
+            logger.error(f"❌ Error extracting qualified name for {list_of_object.name}: {e}")
+
+    logger.info("✅ S3 integration workflow completed successfully!")
+    return {
+        "connection_qualified_name": connection_qualified_name,
+        "bucket_qualified_name": bucket_qualified_name,
+        "s3_objects": created_s3_objects,
+        "object_count": len(created_s3_objects)
+    }
+
+
 
 def load_cache_from_file(filename: str) -> Optional[Dict]:
     """
@@ -535,56 +726,36 @@ def create_s3_to_snowflake_lineage(s3_objects: List[S3Object], snowflake_tables:
 if __name__ == "__main__":
     # Test the integration
     if ATLAN_API_TOKEN:
-
+        
+        #------- Gets all assets -------
         # Show cache status first
-        logger.info("📊 Cache Status Check:")
-        get_cache_status()
-
-        # # Test caching functionality
-        # logger.info("\n🚀 Testing caching functionality...")
-
-        # # First run - should fetch from API and cache
-        # logger.info("\n📊 First run - fetching PostgreSQL tables:")
-        # postgres_tables = find_postgres_tables()
-        # logger.info(f"Found {len(postgres_tables)} PostgreSQL tables")
-
-        # logger.info("\n❄️ First run - fetching Snowflake tables:")
-        # snowflake_tables = find_snowflake_tables()
-        # logger.info(f"Found {len(snowflake_tables)} Snowflake tables")
-
-        # # Second run - should use cache
-        # logger.info("\n📊 Second run - should use cache for PostgreSQL tables:")
-        # postgres_tables_cached = find_postgres_tables()
-        # logger.info(f"Found {len(postgres_tables_cached)} PostgreSQL tables (from cache)")
-
-        # logger.info("\n❄️ Second run - should use cache for Snowflake tables:")
-        # snowflake_tables_cached = find_snowflake_tables()
-        # logger.info(f"Found {len(snowflake_tables_cached)} Snowflake tables (from cache)")
-
-        # # Show final cache status
-        # logger.info("\n📊 Final Cache Status:")
+        # logger.info("📊 Cache Status Check:")
         # get_cache_status()
 
-        postgres_assets = find_postgres_assets(force_refresh=True)
-        logger.info(f"Found {len(postgres_assets)} PostgreSQL assets")
+        # postgres_assets = find_postgres_assets()
+        # logger.info(f"Found {len(postgres_assets)} PostgreSQL assets")
 
-        snowflake_assets = find_snowflake_assets(force_refresh=True)
-        logger.info(f"Found {len(snowflake_assets)} Snowflake assets")
+        # snowflake_assets = find_snowflake_assets()
+        # logger.info(f"Found {len(snowflake_assets)} Snowflake assets")
 
+        # List S3 bucket objects
+        list_s3_bucket_objects(bucket_name="atlan-tech-challenge")
 
+        # Run complete S3 integration workflow
+        s3_integration_result = integration_with_S3()
 
-        # Uncomment to run full S3 integration (requires S3 setup)
+        if s3_integration_result:
+            logger.info(f"🎉 S3 Integration Summary:")
+            logger.info(f"   Connection: {s3_integration_result['connection_qualified_name']}")
+            logger.info(f"   Bucket: {s3_integration_result['bucket_qualified_name']}")
+            logger.info(f"   Objects Created/Updated: {s3_integration_result['object_count']}")
+
+        # Uncomment to run full lineage integration
         # integrate_s3_with_lineage()
 
         
         
 
-        
-
-    
-
-
-        
     else:
         print("❌ ATLAN_API_TOKEN not found. Please set your API token in .env file.")
 
