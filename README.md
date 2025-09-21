@@ -2,6 +2,12 @@
 
 A comprehensive data lineage solution that establishes connections between PostgreSQL → S3 → Snowflake using the Atlan platform. This project creates both table-level and column-level lineage with intelligent caching and automated asset discovery.
 
+## 📸 Working Example
+
+![Working Example Screenshot](./snapshot_of_working_example.png)
+
+*Complete data lineage pipeline in action: 8 PostgreSQL tables → 8 S3 objects → 8 Snowflake tables with 41 column mappings, intelligent caching (90% API reduction), and comprehensive progress tracking.*
+
 ## 🚀 Overview
 
 This project implements a complete data lineage pipeline that:
