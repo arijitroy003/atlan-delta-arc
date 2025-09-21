@@ -1,6 +1,8 @@
 from pyatlan.client.atlan import AtlanClient
 import os
+import json
 import logging
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
@@ -16,6 +18,51 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Cache configuration
+CACHE_EXPIRY_HOURS = 24
+POSTGRES_CACHE_FILE = "postgres_tables_cache.json"
+SNOWFLAKE_CACHE_FILE = "snowflake_tables_cache.json"
+
+
+def clear_all_cache():
+    """
+    Clear all cache files
+    """
+    cache_files = [POSTGRES_CACHE_FILE, SNOWFLAKE_CACHE_FILE]
+    for cache_file in cache_files:
+        try:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+                logger.info(f"🗑️ Cleared cache file: {cache_file}")
+            else:
+                logger.info(f"📁 Cache file not found: {cache_file}")
+        except Exception as e:
+            logger.error(f"❌ Error clearing cache file {cache_file}: {e}")
+
+
+def get_cache_status():
+    """
+    Get status of all cache files
+    """
+    cache_files = [
+        ("PostgreSQL", POSTGRES_CACHE_FILE),
+        ("Snowflake", SNOWFLAKE_CACHE_FILE)
+    ]
+
+    for name, cache_file in cache_files:
+        if os.path.exists(cache_file):
+            cache_data = load_cache_from_file(cache_file)
+            if cache_data and 'timestamp' in cache_data:
+                cache_time = datetime.fromisoformat(cache_data['timestamp'])
+                age = datetime.now() - cache_time
+                is_valid = is_cache_valid(cache_file)
+                status = "✅ Valid" if is_valid else "⏰ Expired"
+                logger.info(f"{name} cache: {status} (age: {age}, items: {len(cache_data.get('data', []))})")
+            else:
+                logger.info(f"{name} cache: ❌ Invalid format")
+        else:
+            logger.info(f"{name} cache: 📁 Not found")
+
 ATLAN_BASE_URL = os.getenv("ATLAN_BASE_URL", "https://tech-challenge.atlan.com")
 ATLAN_API_TOKEN = os.getenv("ATLAN_API_TOKEN")
 
@@ -23,6 +70,69 @@ client = AtlanClient(
     base_url=ATLAN_BASE_URL,
     api_key=ATLAN_API_TOKEN
 )
+
+def load_cache_from_file(filename: str) -> Optional[Dict]:
+    """
+    Load cached data from JSON file
+    """
+    try:
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
+                cache_data = json.load(f)
+                logger.info(f"📁 Loaded cache from {filename}")
+                return cache_data
+        else:
+            logger.info(f"📁 No cache file found: {filename}")
+            return None
+    except Exception as e:
+        logger.warning(f"⚠️ Error loading cache from {filename}: {e}")
+        return None
+
+
+def save_cache_to_file(data: List, filename: str) -> bool:
+    """
+    Save data to JSON file with timestamp
+    """
+    try:
+        cache_data = {
+            "timestamp": datetime.now().isoformat(),
+            "data": data
+        }
+        with open(filename, 'w') as f:
+            json.dump(cache_data, f, indent=2)
+        logger.info(f"💾 Saved cache to {filename} with {len(data)} items")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error saving cache to {filename}: {e}")
+        return False
+
+
+def is_cache_valid(filename: str, max_age_hours: int = CACHE_EXPIRY_HOURS) -> bool:
+    """
+    Check if cache file exists and is within the expiry time
+    """
+    try:
+        if not os.path.exists(filename):
+            return False
+
+        cache_data = load_cache_from_file(filename)
+        if not cache_data or 'timestamp' not in cache_data:
+            return False
+
+        cache_time = datetime.fromisoformat(cache_data['timestamp'])
+        expiry_time = cache_time + timedelta(hours=max_age_hours)
+
+        is_valid = datetime.now() < expiry_time
+        if is_valid:
+            logger.info(f"✅ Cache {filename} is valid (age: {datetime.now() - cache_time})")
+        else:
+            logger.info(f"⏰ Cache {filename} expired (age: {datetime.now() - cache_time})")
+
+        return is_valid
+    except Exception as e:
+        logger.warning(f"⚠️ Error checking cache validity for {filename}: {e}")
+        return False
+
 
 def get_connection_qualified_name(connection_name: str, connection_type: AtlanConnectorType) -> Optional[str]:
     """
@@ -119,7 +229,7 @@ def create_s3_connection() -> Optional[Connection]:
             logger.info(f"✅ Found existing S3 connection: S3-DeltaArc-Connection-ary-v1")
             return existing_connection
             
-        except Exception as search_error:
+        except Exception:
             logger.info(f"🔍 Existing connection not found via search, proceeding to create new one...")
         
         # If existing connection not found, create a new one
@@ -174,7 +284,7 @@ def register_s3_bucket(connection: Connection, bucket_arn: str) -> Optional[S3Bu
     Register S3 bucket following official Atlan documentation
     """
     try:
-        bucket_name = bucket_arn.split(":")[-1]  # Extract bucket name from ARN
+        bucket_name = "atlan-tech-challenge"  # Extract bucket name from ARN
         
         # Create S3 bucket using official pattern
         # Based on: https://developer.atlan.com/patterns/create/aws/
@@ -230,72 +340,92 @@ def create_s3_objects(bucket: S3Bucket, connection: Connection) -> List[S3Object
     return s3_objects
 
 
-def find_postgres_tables() -> List[Table]:
+def find_postgres_assets(force_refresh: bool = False) -> List[Table]:
     """
     Find existing PostgreSQL tables in Atlan for connection 'postgres-ary'
-    Enhanced to iterate through all pages of results
+    Enhanced with caching to avoid repeated API calls
     """
+    # Check cache first unless force refresh is requested
+    if not force_refresh and is_cache_valid(POSTGRES_CACHE_FILE):
+        cache_data = load_cache_from_file(POSTGRES_CACHE_FILE)
+        if cache_data and 'data' in cache_data:
+            logger.info(f"📊 Using cached PostgreSQL tables ({len(cache_data['data'])} items)")
+            return cache_data['data']
+
+    logger.info("📊 Fetching PostgreSQL tables from API...")
     postgres_ary_qualified_name = get_connection_qualified_name(
             connection_name="postgres-ary",
             connection_type=AtlanConnectorType.POSTGRES,
     )
     logger.info(f"📊 Found postgres-ary connection: {postgres_ary_qualified_name}")
-    
+
     postgres_assets = []
-    
+
     if postgres_ary_qualified_name:
         try:
             # Search for all assets and filter by qualified name prefix
             search_request = (
                 FluentSearch()
-                .where(Asset.TYPE_NAME.eq("Table"))
-                .page_size(50)  # Use smaller page size for better performance
+                .where(Asset.QUALIFIED_NAME.startswith(postgres_ary_qualified_name))
+                .include_on_results(Asset.QUALIFIED_NAME)
+                .include_on_results(Asset.NAME)
+                .include_on_results(Asset.TYPE_NAME)
             ).to_request()
             
+
             response = client.asset.search(search_request)
-            
+
             # Iterate through all pages of results
-            logger.info("📊 Iterating through all pages of PostgreSQL table results...")
-            page_count = 0
+            logger.info("📊 Iterating through all pages of PostgreSQL assets results...")
             total_processed = 0
-            
+
             for asset in response:  # This iterates through all pages automatically
                 total_processed += 1
-                
+
                 # Filter for assets that belong to postgres-ary connection
-                if (asset.qualified_name and 
-                    asset.qualified_name.startswith(f"{postgres_ary_qualified_name}/") and
-                    isinstance(asset, Table)):
-                    postgres_assets.append(asset)
-                    
+                if (asset.qualified_name and
+                    asset.qualified_name.startswith(f"{postgres_ary_qualified_name}/")):
+                    postgres_assets.append([asset.qualified_name, asset.name, asset.type_name])
+
                 # Log progress every 100 assets
                 if total_processed % 100 == 0:
-                    logger.info(f"📊 Processed {total_processed} assets, found {len(postgres_assets)} PostgreSQL tables so far...")
-            
+                    logger.info(f"📊 Processed {total_processed} assets, found {len(postgres_assets)} PostgreSQL assets so far...")
+
             logger.info(f"📊 Completed search: processed {total_processed} total assets")
             logger.info(f"📊 Found {len(postgres_assets)} tables in postgres-ary connection:")
             for asset in postgres_assets:
-                logger.info(f"  🔹 {asset.name} (Type: {asset.type_name}, Qualified Name: {asset.qualified_name})")
-                
+                logger.info(f"  🔹 {asset[1]} (Type: {asset[2]}, Qualified Name: {asset[0]})")
+
+            # Save to cache
+            save_cache_to_file(postgres_assets, POSTGRES_CACHE_FILE)
+
         except Exception as e:
             logger.error(f"❌ Error searching postgres-ary assets: {e}")
-    
+
     return postgres_assets
 
 
-def find_snowflake_tables() -> List[Table]:
+def find_snowflake_tables(force_refresh: bool = False) -> List[Table]:
     """
     Find existing Snowflake tables in Atlan for connection 'snowflake-ary'
-    Enhanced to iterate through all pages of results
+    Enhanced with caching to avoid repeated API calls
     """
+    # Check cache first unless force refresh is requested
+    if not force_refresh and is_cache_valid(SNOWFLAKE_CACHE_FILE):
+        cache_data = load_cache_from_file(SNOWFLAKE_CACHE_FILE)
+        if cache_data and 'data' in cache_data:
+            logger.info(f"❄️ Using cached Snowflake tables ({len(cache_data['data'])} items)")
+            return cache_data['data']
+
+    logger.info("❄️ Fetching Snowflake tables from API...")
     snowflake_ary_qualified_name = get_connection_qualified_name(
             connection_name="snowflake-ary",
             connection_type=AtlanConnectorType.SNOWFLAKE,
         )
     logger.info(f"❄️ Found snowflake-ary connection: {snowflake_ary_qualified_name}")
-    
+
     snowflake_assets = []
-    
+
     if snowflake_ary_qualified_name:
         try:
             # Search for all assets and filter by qualified name prefix
@@ -304,34 +434,37 @@ def find_snowflake_tables() -> List[Table]:
                 .where(Asset.TYPE_NAME.eq("Table"))
                 .page_size(50)  # Use smaller page size for better performance
             ).to_request()
-            
+
             response = client.asset.search(search_request)
-            
+
             # Iterate through all pages of results
             logger.info("❄️ Iterating through all pages of Snowflake table results...")
             total_processed = 0
-            
+
             for asset in response:  # This iterates through all pages automatically
                 total_processed += 1
-                
+
                 # Filter for assets that belong to snowflake-ary connection
-                if (asset.qualified_name and 
+                if (asset.qualified_name and
                     asset.qualified_name.startswith(f"{snowflake_ary_qualified_name}/") and
                     isinstance(asset, Table)):
-                    snowflake_assets.append(asset)
-                    
+                    snowflake_assets.append([asset.qualified_name, asset.name, asset.type_name])
+
                 # Log progress every 100 assets
                 if total_processed % 100 == 0:
                     logger.info(f"❄️ Processed {total_processed} assets, found {len(snowflake_assets)} Snowflake tables so far...")
-            
+
             logger.info(f"❄️ Completed search: processed {total_processed} total assets")
             logger.info(f"❄️ Found {len(snowflake_assets)} tables in snowflake-ary connection:")
             for asset in snowflake_assets:
-                logger.info(f"  🔹 {asset.name} (Type: {asset.type_name}, Qualified Name: {asset.qualified_name})")
-                
+                logger.info(f"  🔹 {asset[1]} (Type: {asset[2]}, Qualified Name: {asset[0]})")
+
+            # Save to cache
+            save_cache_to_file(snowflake_assets, SNOWFLAKE_CACHE_FILE)
+
         except Exception as e:
             logger.error(f"❌ Error searching snowflake-ary assets: {e}")
-    
+
     return snowflake_assets
 
 def create_postgres_to_s3_lineage(postgres_tables: List[Table], s3_objects: List[S3Object]):
@@ -402,8 +535,42 @@ if __name__ == "__main__":
     # Test the integration
     if ATLAN_API_TOKEN:
 
-        find_postgres_tables()
-        find_snowflake_tables()
+        # Show cache status first
+        logger.info("📊 Cache Status Check:")
+        get_cache_status()
+
+        # # Test caching functionality
+        # logger.info("\n🚀 Testing caching functionality...")
+
+        # # First run - should fetch from API and cache
+        # logger.info("\n📊 First run - fetching PostgreSQL tables:")
+        # postgres_tables = find_postgres_tables()
+        # logger.info(f"Found {len(postgres_tables)} PostgreSQL tables")
+
+        # logger.info("\n❄️ First run - fetching Snowflake tables:")
+        # snowflake_tables = find_snowflake_tables()
+        # logger.info(f"Found {len(snowflake_tables)} Snowflake tables")
+
+        # # Second run - should use cache
+        # logger.info("\n📊 Second run - should use cache for PostgreSQL tables:")
+        # postgres_tables_cached = find_postgres_tables()
+        # logger.info(f"Found {len(postgres_tables_cached)} PostgreSQL tables (from cache)")
+
+        # logger.info("\n❄️ Second run - should use cache for Snowflake tables:")
+        # snowflake_tables_cached = find_snowflake_tables()
+        # logger.info(f"Found {len(snowflake_tables_cached)} Snowflake tables (from cache)")
+
+        # # Show final cache status
+        # logger.info("\n📊 Final Cache Status:")
+        # get_cache_status()
+
+        postgres_tables = find_postgres_assets(force_refresh=True)
+        logger.info(f"Found {len(postgres_tables)} PostgreSQL tables")
+
+
+
+        # Uncomment to run full S3 integration (requires S3 setup)
+        # integrate_s3_with_lineage()
 
         
         
