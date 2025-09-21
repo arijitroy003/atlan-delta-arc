@@ -233,6 +233,7 @@ def create_s3_objects(bucket: S3Bucket, connection: Connection) -> List[S3Object
 def find_postgres_tables() -> List[Table]:
     """
     Find existing PostgreSQL tables in Atlan for connection 'postgres-ary'
+    Enhanced to iterate through all pages of results
     """
     postgres_ary_qualified_name = get_connection_qualified_name(
             connection_name="postgres-ary",
@@ -240,67 +241,98 @@ def find_postgres_tables() -> List[Table]:
     )
     logger.info(f"📊 Found postgres-ary connection: {postgres_ary_qualified_name}")
     
+    postgres_assets = []
+    
     if postgres_ary_qualified_name:
-            try:
-                # Search for all assets and filter by qualified name prefix
-                search_request = (
-                    FluentSearch()
-                    .where(Asset.TYPE_NAME.eq("Table"))
-                    .page_size(1000)
-                ).to_request()
-                
-                response = client.asset.search(search_request)
-                all_assets = response.current_page()
+        try:
+            # Search for all assets and filter by qualified name prefix
+            search_request = (
+                FluentSearch()
+                .where(Asset.TYPE_NAME.eq("Table"))
+                .page_size(50)  # Use smaller page size for better performance
+            ).to_request()
+            
+            response = client.asset.search(search_request)
+            
+            # Iterate through all pages of results
+            logger.info("📊 Iterating through all pages of PostgreSQL table results...")
+            page_count = 0
+            total_processed = 0
+            
+            for asset in response:  # This iterates through all pages automatically
+                total_processed += 1
                 
                 # Filter for assets that belong to postgres-ary connection
-                postgres_assets = [
-                    asset for asset in all_assets 
-                    if asset.qualified_name and asset.qualified_name.startswith(f"{postgres_ary_qualified_name}/")
-                ]
-                
-                logger.info(f"📊 Found {len(postgres_assets)} tables in postgres-ary connection:")
-                for asset in postgres_assets:
-                    logger.info(f"  🔹 {asset.name} (Type: {asset.type_name}, Qualified Name: {asset.qualified_name})")
+                if (asset.qualified_name and 
+                    asset.qualified_name.startswith(f"{postgres_ary_qualified_name}/") and
+                    isinstance(asset, Table)):
+                    postgres_assets.append(asset)
                     
-            except Exception as e:
-                logger.error(f"❌ Error searching postgres-ary assets: {e}")
+                # Log progress every 100 assets
+                if total_processed % 100 == 0:
+                    logger.info(f"📊 Processed {total_processed} assets, found {len(postgres_assets)} PostgreSQL tables so far...")
+            
+            logger.info(f"📊 Completed search: processed {total_processed} total assets")
+            logger.info(f"📊 Found {len(postgres_assets)} tables in postgres-ary connection:")
+            for asset in postgres_assets:
+                logger.info(f"  🔹 {asset.name} (Type: {asset.type_name}, Qualified Name: {asset.qualified_name})")
+                
+        except Exception as e:
+            logger.error(f"❌ Error searching postgres-ary assets: {e}")
     
-    return []
+    return postgres_assets
 
 
 def find_snowflake_tables() -> List[Table]:
     """
     Find existing Snowflake tables in Atlan for connection 'snowflake-ary'
+    Enhanced to iterate through all pages of results
     """
     snowflake_ary_qualified_name = get_connection_qualified_name(
             connection_name="snowflake-ary",
             connection_type=AtlanConnectorType.SNOWFLAKE,
         )
     logger.info(f"❄️ Found snowflake-ary connection: {snowflake_ary_qualified_name}")
+    
+    snowflake_assets = []
+    
     if snowflake_ary_qualified_name:
-            try:
-                # Search for all assets and filter by qualified name prefix
-                search_request = (
-                    FluentSearch()
-                    .where(Asset.TYPE_NAME.eq("Table"))
-                    .page_size(2000)
-                ).to_request()
-                
-                response = client.asset.search(search_request)
-                all_assets = response.current_page()
+        try:
+            # Search for all assets and filter by qualified name prefix
+            search_request = (
+                FluentSearch()
+                .where(Asset.TYPE_NAME.eq("Table"))
+                .page_size(50)  # Use smaller page size for better performance
+            ).to_request()
+            
+            response = client.asset.search(search_request)
+            
+            # Iterate through all pages of results
+            logger.info("❄️ Iterating through all pages of Snowflake table results...")
+            total_processed = 0
+            
+            for asset in response:  # This iterates through all pages automatically
+                total_processed += 1
                 
                 # Filter for assets that belong to snowflake-ary connection
-                snowflake_assets = [
-                    asset for asset in all_assets 
-                    if asset.qualified_name and asset.qualified_name.startswith(f"{snowflake_ary_qualified_name}/")
-                ]
-                
-                logger.info(f"❄️ Found {len(snowflake_assets)} tables in snowflake-ary connection:")
-                for asset in snowflake_assets:
-                    logger.info(f"  🔹 {asset.name} (Type: {asset.type_name}, Qualified Name: {asset.qualified_name})")
+                if (asset.qualified_name and 
+                    asset.qualified_name.startswith(f"{snowflake_ary_qualified_name}/") and
+                    isinstance(asset, Table)):
+                    snowflake_assets.append(asset)
                     
-            except Exception as e:
-                logger.error(f"❌ Error searching snowflake-ary assets: {e}")
+                # Log progress every 100 assets
+                if total_processed % 100 == 0:
+                    logger.info(f"❄️ Processed {total_processed} assets, found {len(snowflake_assets)} Snowflake tables so far...")
+            
+            logger.info(f"❄️ Completed search: processed {total_processed} total assets")
+            logger.info(f"❄️ Found {len(snowflake_assets)} tables in snowflake-ary connection:")
+            for asset in snowflake_assets:
+                logger.info(f"  🔹 {asset.name} (Type: {asset.type_name}, Qualified Name: {asset.qualified_name})")
+                
+        except Exception as e:
+            logger.error(f"❌ Error searching snowflake-ary assets: {e}")
+    
+    return snowflake_assets
 
 def create_postgres_to_s3_lineage(postgres_tables: List[Table], s3_objects: List[S3Object]):
     """
@@ -370,8 +402,9 @@ if __name__ == "__main__":
     # Test the integration
     if ATLAN_API_TOKEN:
 
-        # find_postgres_tables()
+        find_postgres_tables()
         find_snowflake_tables()
+
         
         
 
