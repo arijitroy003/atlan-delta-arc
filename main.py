@@ -2,13 +2,15 @@ from pyatlan.client.atlan import AtlanClient
 import os
 import json
 import logging
+import boto3
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
+from botocore import UNSIGNED
+from botocore.client import Config
 
-from pyatlan.model.assets import Connection, S3Bucket, S3Object, Table, Process, Asset
+from pyatlan.model.assets import Connection, S3Bucket, S3Object, Table, Process, Asset, Column
 from pyatlan.model.enums import AtlanConnectorType
-from pyatlan.model.search import IndexSearchRequest
 from pyatlan.model.fluent_search import FluentSearch
 
 # Load environment variables from .env file
@@ -18,12 +20,24 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Cache configuration
-CACHE_EXPIRY_HOURS = 24
-POSTGRES_CACHE_FILE = "postgres_assets_cache.json"
-SNOWFLAKE_CACHE_FILE = "snowflake_assets_cache.json"
-ATLAN_BASE_URL = os.getenv("ATLAN_BASE_URL", "https://tech-challenge.atlan.com")
+# Configuration constants from environment variables
+CACHE_EXPIRY_HOURS = int(os.getenv("CACHE_EXPIRY_HOURS"))
+POSTGRES_CACHE_FILE = os.getenv("POSTGRES_CACHE_FILE")
+SNOWFLAKE_CACHE_FILE = os.getenv("SNOWFLAKE_CACHE_FILE")
+
+# Atlan Tenant configuration
+ATLAN_BASE_URL = os.getenv("ATLAN_BASE_URL")
 ATLAN_API_TOKEN = os.getenv("ATLAN_API_TOKEN")
+
+# S3 configuration
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+S3_BUCKET_ARN = os.getenv("S3_BUCKET_ARN")
+S3_CONNECTION_NAME = os.getenv("S3_CONNECTION_NAME")
+S3_PREFIX = os.getenv("S3_PREFIX")
+
+# Database connections
+POSTGRES_CONNECTION_NAME = os.getenv("POSTGRES_CONNECTION_NAME")
+SNOWFLAKE_CONNECTION_NAME = os.getenv("SNOWFLAKE_CONNECTION_NAME")
 
 client = AtlanClient(
     base_url=ATLAN_BASE_URL,
@@ -71,15 +85,11 @@ def get_cache_status():
             logger.info(f"{name} cache: 📁 Not found")
 
 
-def list_s3_bucket_objects(bucket_name: str) -> List[str]:
+def list_s3_bucket_objects(bucket_name: str = S3_BUCKET_NAME) -> List[str]:
     """
     List objects in a public S3 bucket and return their keys
     """
     try:
-        import boto3
-        from botocore import UNSIGNED
-        from botocore.client import Config
-
         # Create S3 client for public bucket access
         s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
 
@@ -100,7 +110,7 @@ def list_s3_bucket_objects(bucket_name: str) -> List[str]:
         return []
 
 
-def integration_with_S3(bucket_name: str = "atlan-tech-challenge", bucket_arn: str = "arn:aws:s3:::atlan-tech-challenge", prefix: str = "2025/csa-tech-challenge-ary/"):
+def integration_with_S3(bucket_name: str = S3_BUCKET_NAME, bucket_arn: str = S3_BUCKET_ARN, prefix: str = S3_PREFIX):
     """
     Complete S3 integration workflow: setup connection, register bucket, and create objects
     """
@@ -108,11 +118,10 @@ def integration_with_S3(bucket_name: str = "atlan-tech-challenge", bucket_arn: s
 
     # ------------- setup s3 connection ---------------
     logger.info("🔍 Setting up S3 connection...")
-    connection_name = "aws-s3-connection-ary-test"
 
     # Check if connection already exists
     existing_connection_qn = get_connection_qualified_name(
-        connection_name=connection_name,
+        connection_name=S3_CONNECTION_NAME,
         connection_type=AtlanConnectorType.S3
     )
 
@@ -124,7 +133,7 @@ def integration_with_S3(bucket_name: str = "atlan-tech-challenge", bucket_arn: s
         try:
             connection = Connection.creator(
                 client=client,
-                name=connection_name,
+                name=S3_CONNECTION_NAME,
                 connector_type=AtlanConnectorType.S3,
                 admin_users=["arijitroy003"],
             )
@@ -169,25 +178,20 @@ def integration_with_S3(bucket_name: str = "atlan-tech-challenge", bucket_arn: s
     logger.info("🔍 Getting list of files from S3 bucket...")
 
     # Get actual files from S3 bucket using boto3
-    import boto3
-    from botocore import UNSIGNED
-    from botocore.client import Config
-
     s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
     response = s3.list_objects_v2(Bucket=bucket_name)
     s3_filenames = [obj['Key'] for obj in response.get('Contents', [])]
     logger.info(f"📦 Found {len(s3_filenames)} files in S3 bucket: {s3_filenames}")
 
-    # Check if S3 objects already exist in Atlan
-    logger.info("🔍 Checking if S3 objects already exist in Atlan...")
-    list_of_objects = []
+    # Check if S3 objects with prefix already exist in Atlan
+    logger.info("🔍 Checking if S3 objects with prefix already exist in Atlan...")
     search_request = (
         FluentSearch()
         .where(Asset.TYPE_NAME.eq("S3Object"))
         .where(S3Object.S3BUCKET_QUALIFIED_NAME.eq(bucket_qualified_name))
         .include_on_results(Asset.QUALIFIED_NAME)
         .include_on_results(Asset.NAME)
-        .page_size(50)  # Get more objects to check all files
+        .page_size(50)
     ).to_request()
 
     search_response = client.asset.search(search_request)
@@ -196,35 +200,14 @@ def integration_with_S3(bucket_name: str = "atlan-tech-challenge", bucket_arn: s
 
     logger.info(f"📋 Found {len(existing_objects)} existing S3 objects in Atlan: {existing_object_names}")
 
-    # Compare S3 files with existing Atlan objects and create missing ones
-    missing_files = [f for f in s3_filenames if f not in existing_object_names]
-
-    if missing_files:
-        logger.info(f"🔧 Creating {len(missing_files)} missing S3 objects: {missing_files}")
-        for file_name in missing_files:
-            try:
-                s3_object = S3Object.creator(
-                    name=file_name,
-                    connection_qualified_name=connection_qualified_name,
-                    s3_bucket_qualified_name=bucket_qualified_name
-                )
-                response = client.asset.save(s3_object)
-                saved_object = response.assets_created(asset_type=S3Object)[0]
-                list_of_objects.append(saved_object)
-                logger.info(f"✅ Created S3 object: {file_name}")
-            except Exception as e:
-                logger.error(f"❌ Error creating S3 object {file_name}: {e}")
-
-    # Add existing objects to the list
-    list_of_objects.extend(existing_objects)
-    logger.info(f"📄 Final list_of_objects contains {len(list_of_objects)} S3 objects")
-
-    # Create S3 objects with prefix
+    # Create S3 objects with prefix directly (optimized workflow)
     created_s3_objects = []
-    for list_of_object in list_of_objects:
+
+    for file_name in s3_filenames:
         try:
+            # Create S3 object with prefix directly
             s3object = S3Object.creator_with_prefix(
-                name=list_of_object.name,
+                name=file_name,
                 connection_qualified_name=connection_qualified_name,
                 prefix=prefix,
                 s3_bucket_name=bucket_name,
@@ -232,25 +215,25 @@ def integration_with_S3(bucket_name: str = "atlan-tech-challenge", bucket_arn: s
             )
             response = client.asset.save(s3object)
 
-            # Extract qualified name from response
+            # Extract object from response
             created_objects = response.assets_created(asset_type=S3Object)
             updated_objects = response.assets_updated(asset_type=S3Object)
 
             if created_objects:
                 created_object = created_objects[0]
-                logger.info(f"✅ Created S3 object: {list_of_object.name}")
+                logger.info(f"✅ Created S3 object: {file_name}")
                 logger.info(f"--📋 Qualified Name: {created_object.qualified_name}")
                 created_s3_objects.append(created_object)
             elif updated_objects:
                 updated_object = updated_objects[0]
-                logger.info(f"🔄 Updated S3 object: {list_of_object.name}")
+                logger.info(f"🔄 Updated S3 object: {file_name}")
                 logger.info(f"--📋 Qualified Name: {updated_object.qualified_name}")
                 created_s3_objects.append(updated_object)
             else:
-                logger.info(f"✅ Processed S3 object: {list_of_object.name}")
-                logger.info(f"--📋 No objects created or updated")
+                logger.info(f"✅ Processed S3 object: {file_name}")
+
         except Exception as e:
-            logger.error(f"❌ Error extracting qualified name for {list_of_object.name}: {e}")
+            logger.error(f"❌ Error creating S3 object {file_name}: {e}")
 
     logger.info("✅ S3 integration workflow completed successfully!")
     return {
@@ -345,196 +328,15 @@ def get_connection_qualified_name(connection_name: str, connection_type: AtlanCo
         return None
     
 
-def integrate_s3_with_lineage(s3_bucket_arn: str = "arn:aws:s3:::atlan-tech-challenge") -> bool:
+def find_postgres_assets(force_refresh: bool = False) -> List[List[str]]:
     """
-    Integrate S3 bucket with Atlan and establish lineage: PostgreSQL → S3 → Snowflake
-    
-    Based on official Atlan documentation patterns:
-    https://developer.atlan.com/patterns/create/aws/
-    
+    Find all PostgreSQL assets (tables, columns, schemas) for postgres-ary connection
+
     Args:
-        s3_bucket_arn: S3 bucket ARN (read-only access)
-        
+        force_refresh: If True, bypass cache and fetch fresh data
+
     Returns:
-        bool: Success status of the integration
-    """
-    logger.info("🚀 Starting S3 integration with PostgreSQL → S3 → Snowflake lineage")
-    
-    try:
-        # Step 1: Create or find S3 connection
-        s3_connection = create_s3_connection()
-        if not s3_connection:
-            logger.error("❌ Failed to create/find S3 connection")
-            return False
-            
-        # Step 2: Register S3 bucket
-        s3_bucket = register_s3_bucket(s3_connection, s3_bucket_arn)
-        if not s3_bucket:
-            logger.error("❌ Failed to register S3 bucket")
-            return False
-            
-        # Step 3: Create sample S3 objects (metadata representation)
-        s3_objects = create_s3_objects(s3_bucket, s3_connection)
-        if not s3_objects:
-            logger.error("❌ Failed to create S3 objects")
-            return False
-            
-        # Step 4: Find existing PostgreSQL assets
-        postgres_assets = find_postgres_assets()
-        logger.info(f"📊 Found {len(postgres_assets)} PostgreSQL assets")
-
-        # Step 5: Find existing Snowflake assets
-        snowflake_assets = find_snowflake_assets()
-        logger.info(f"❄️ Found {len(snowflake_assets)} Snowflake assets")
-        
-        # Step 6: Create PostgreSQL → S3 lineage
-        create_postgres_to_s3_lineage(postgres_assets, s3_objects)
-
-        # Step 7: Create S3 → Snowflake lineage
-        create_s3_to_snowflake_lineage(s3_objects, snowflake_assets)
-        
-        logger.info("✅ S3 integration with complete lineage established successfully!")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ S3 integration failed: {e}")
-        return False
-
-
-def create_s3_connection() -> Optional[Connection]:
-    """
-    Create or find S3 connection following Atlan documentation patterns
-    Based on: https://developer.atlan.com/patterns/create/aws/#connection
-    """
-    try:
-        # First, check if S3-DeltaArc-Connection-ary-v1 already exists
-        logger.info("🔍 Checking if S3-DeltaArc-Connection-ary-v1 already exists...")
-        
-        try:
-            # Try to search for existing connection by name
-            # Since we know S3-DeltaArc-Connection-ary-v1 exists, let's reference it
-            existing_connection = Connection()
-            existing_connection.name = "S3-DeltaArc-Connection-ary-v1"
-            existing_connection.qualified_name = "default/s3/1234567890"  # Mock qualified name for existing connection
-            
-            logger.info(f"✅ Found existing S3 connection: S3-DeltaArc-Connection-ary-v1")
-            return existing_connection
-            
-        except Exception:
-            logger.info(f"🔍 Existing connection not found via search, proceeding to create new one...")
-        
-        # If existing connection not found, create a new one
-        try:
-            # Get current user for admin assignment
-            current_user = client.user.get_current()
-            admin_user = current_user.username if hasattr(current_user, 'username') else None
-            logger.info(f"Current user: {admin_user}")
-            
-            # Create connection following documentation pattern
-            connection = Connection.creator(
-                name="S3-DeltaArc-Connection-ary-v2",  # New version if v1 doesn't work
-                connector_type=AtlanConnectorType.S3,
-                admin_users=[admin_user] if admin_user else [],
-                client=client
-            )
-            
-            # Save with timeout handling
-            logger.info("⏳ Creating new S3 connection (this may take a moment)...")
-            response = client.asset.save(connection)
-            
-            # Extract the created connection from the response
-            if hasattr(response, 'assets_created') and response.assets_created:
-                saved_connection = response.assets_created[0]
-                logger.info(f"✅ S3 connection created successfully: {saved_connection.qualified_name}")
-                return saved_connection
-            else:
-                logger.warning("⚠️ Connection created but response format unexpected")
-                # Create mock connection with proper qualified name
-                mock_connection = Connection()
-                mock_connection.qualified_name = "default/s3/1234567890"
-                mock_connection.name = "S3-DeltaArc-Connection-ary-v2"
-                return mock_connection
-            
-        except Exception as create_error:
-            logger.warning(f"⚠️ Connection creation issue: {create_error}")
-            logger.info("⚠️ Using existing S3-DeltaArc-Connection-ary-v1 as fallback")
-            
-            # Fallback to the existing connection we know exists
-            fallback_connection = Connection()
-            fallback_connection.qualified_name = "default/s3/1234567890"
-            fallback_connection.name = "S3-DeltaArc-Connection-ary-v1"
-            return fallback_connection
-        
-    except Exception as e:
-        logger.error(f"❌ Error with S3 connection: {e}")
-        return None
-
-
-def register_s3_bucket(connection: Connection, bucket_arn: str) -> Optional[S3Bucket]:
-    """
-    Register S3 bucket following official Atlan documentation
-    """
-    try:
-        bucket_name = "atlan-tech-challenge"  # Extract bucket name from ARN
-        
-        # Create S3 bucket using official pattern
-        # Based on: https://developer.atlan.com/patterns/create/aws/
-        s3_bucket = S3Bucket.creator(
-            name=bucket_name,
-            connection_qualified_name=connection.qualified_name
-        )
-        
-        # Set additional properties as per documentation
-        s3_bucket.aws_arn = bucket_arn
-        s3_bucket.description = f"Delta Arc Corp data pipeline S3 bucket - {bucket_name}"
-        
-        saved_bucket = client.asset.save(s3_bucket)
-        logger.info(f"✅ Registered S3 bucket: {saved_bucket.qualified_name}")
-        return saved_bucket
-        
-    except Exception as e:
-        logger.error(f"❌ Error registering S3 bucket: {e}")
-        return None
-
-
-def create_s3_objects(bucket: S3Bucket, connection: Connection) -> List[S3Object]:
-    """
-    Create S3 objects using prefix pattern from Atlan documentation
-    """
-    s3_objects = []
-    
-    # Sample data objects representing typical data pipeline files
-    object_configs = [
-        {"name": "users_export.parquet", "prefix": "/exports/users/2024/01"},
-        {"name": "accounts_export.parquet", "prefix": "/exports/accounts/2024/01"},
-        {"name": "transactions_export.parquet", "prefix": "/exports/transactions/2024/01"},
-    ]
-    
-    for config in object_configs:
-        try:
-            # Use creator_with_prefix pattern from documentation
-            s3_object = S3Object.creator_with_prefix(
-                name=config["name"],
-                connection_qualified_name=connection.qualified_name,
-                prefix=config["prefix"],
-                s3_bucket_name=bucket.name,
-                s3_bucket_qualified_name=bucket.qualified_name
-            )
-            
-            saved_object = client.asset.save(s3_object)
-            s3_objects.append(saved_object)
-            logger.info(f"✅ Created S3 object: {saved_object.qualified_name}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error creating S3 object {config['name']}: {e}")
-            
-    return s3_objects
-
-
-def find_postgres_assets(force_refresh: bool = False) -> List[Table]:
-    """
-    Find existing PostgreSQL tables in Atlan for connection 'postgres-ary'
-    Enhanced with caching to avoid repeated API calls
+        List of assets as [qualified_name, name, type_name] tuples
     """
     # Check cache first unless force refresh is requested
     if not force_refresh and is_cache_valid(POSTGRES_CACHE_FILE):
@@ -543,9 +345,9 @@ def find_postgres_assets(force_refresh: bool = False) -> List[Table]:
             logger.info(f"📊 Using cached PostgreSQL tables ({len(cache_data['data'])} items)")
             return cache_data['data']
 
-    logger.info("📊 Fetching PostgreSQL tables from API...")
+    logger.info("📊 Fetching PostgreSQL assets from API...")
     postgres_ary_qualified_name = get_connection_qualified_name(
-            connection_name="postgres-ary",
+            connection_name=POSTGRES_CONNECTION_NAME,
             connection_type=AtlanConnectorType.POSTGRES,
     )
     logger.info(f"📊 Found postgres-ary connection: {postgres_ary_qualified_name}")
@@ -596,10 +398,15 @@ def find_postgres_assets(force_refresh: bool = False) -> List[Table]:
     return postgres_assets
 
 
-def find_snowflake_assets(force_refresh: bool = False) -> List[Table]:
+def find_snowflake_assets(force_refresh: bool = False) -> List[List[str]]:
     """
-    Find existing Snowflake assets in Atlan for connection 'snowflake-ary'
-    Enhanced with caching to avoid repeated API calls
+    Find all Snowflake assets (tables, columns, schemas) for snowflake-ary connection
+
+    Args:
+        force_refresh: If True, bypass cache and fetch fresh data
+
+    Returns:
+        List of assets as [qualified_name, name, type_name] tuples
     """
     # Check cache first unless force refresh is requested
     if not force_refresh and is_cache_valid(SNOWFLAKE_CACHE_FILE):
@@ -610,7 +417,7 @@ def find_snowflake_assets(force_refresh: bool = False) -> List[Table]:
 
     logger.info("❄️ Fetching Snowflake assets from API...")
     snowflake_ary_qualified_name = get_connection_qualified_name(
-            connection_name="snowflake-ary",
+            connection_name=SNOWFLAKE_CONNECTION_NAME,
             connection_type=AtlanConnectorType.SNOWFLAKE,
         )
     logger.info(f"❄️ Found snowflake-ary connection: {snowflake_ary_qualified_name}")
@@ -659,74 +466,14 @@ def find_snowflake_assets(force_refresh: bool = False) -> List[Table]:
 
     return snowflake_assets
 
-def create_postgres_to_s3_lineage(postgres_tables: List[Table], s3_objects: List[S3Object]):
+def create_table_lineage(postgres_assets: List[List[str]], s3_objects: List[S3Object], snowflake_assets: List[List[str]]):
     """
-    Create lineage processes: PostgreSQL → S3
-    Following Process relationship pattern from documentation
-    """
-    for pg_table in postgres_tables:
-        # Match PostgreSQL table to S3 object by name similarity
-        table_name = pg_table.name.lower()
-        matching_s3_objects = [
-            obj for obj in s3_objects 
-            if any(keyword in obj.name.lower() for keyword in [table_name, table_name.rstrip('s')])
-        ]
-        
-        for s3_obj in matching_s3_objects:
-            try:
-                # Create lineage process as per documentation
-                process = Process.creator(
-                    name=f"PostgreSQL-to-S3-{pg_table.name}",
-                    connection_qualified_name=pg_table.connection_qualified_name,
-                    inputs=[pg_table],
-                    outputs=[s3_obj]
-                )
-                
-                process.description = f"ETL export from PostgreSQL {pg_table.name} to S3"
-                
-                client.asset.save(process)
-                logger.info(f"🔗 Created lineage: {pg_table.qualified_name} → {s3_obj.qualified_name}")
-                
-            except Exception as e:
-                logger.error(f"❌ Error creating PostgreSQL→S3 lineage: {e}")
+    Create table-level lineage processes: PostgreSQL tables → S3 objects → Snowflake tables
 
-
-def create_s3_to_snowflake_lineage(s3_objects: List[S3Object], snowflake_tables: List[Table]):
-    """
-    Create lineage processes: S3 → Snowflake
-    Following Process relationship pattern from documentation
-    """
-    for sf_table in snowflake_tables:
-        # Match Snowflake table to S3 object by name similarity
-        table_name = sf_table.name.lower()
-        matching_s3_objects = [
-            obj for obj in s3_objects
-            if any(keyword in obj.name.lower() for keyword in [table_name, table_name.replace('dim_', ''), table_name.replace('fact_', '')])
-        ]
-
-        for s3_obj in matching_s3_objects:
-            try:
-                # Create lineage process as per documentation
-                process = Process.creator(
-                    name=f"S3-to-Snowflake-{sf_table.name}",
-                    connection_qualified_name=sf_table.connection_qualified_name,
-                    inputs=[s3_obj],
-                    outputs=[sf_table]
-                )
-
-                process.description = f"Data ingestion from S3 to Snowflake {sf_table.name}"
-
-                client.asset.save(process)
-                logger.info(f"🔗 Created lineage: {s3_obj.qualified_name} → {sf_table.qualified_name}")
-
-            except Exception as e:
-                logger.error(f"❌ Error creating S3→Snowflake lineage: {e}")
-
-
-def create_table_lineage(postgres_assets: List, s3_objects: List, snowflake_assets: List):
-    """
-    Create table-level lineage: PostgreSQL → S3 → Snowflake
-    Based on https://developer.atlan.com/snippets/common-examples/lineage/manage/#create-lineage-between-assets
+    Args:
+        postgres_assets: List of PostgreSQL assets from find_postgres_assets()
+        s3_objects: List of S3Object instances from integration_with_S3()
+        snowflake_assets: List of Snowflake assets from find_snowflake_assets()
     """
     logger.info("🔗 Starting table-level lineage creation...")
 
@@ -795,10 +542,13 @@ def create_table_lineage(postgres_assets: List, s3_objects: List, snowflake_asse
     logger.info(f"🎉 Table lineage creation completed! Created {lineage_count} lineage processes.")
 
 
-def create_column_lineage(postgres_assets: List, snowflake_assets: List):
+def create_column_lineage(postgres_assets: List[List[str]], snowflake_assets: List[List[str]]):
     """
-    Create column-level lineage: PostgreSQL columns → Snowflake columns
-    Maps individual columns between matching tables
+    Create column-level lineage processes: PostgreSQL columns → Snowflake columns
+
+    Args:
+        postgres_assets: List of PostgreSQL assets from find_postgres_assets()
+        snowflake_assets: List of Snowflake assets from find_snowflake_assets()
     """
     logger.info("🔗 Starting column-level lineage creation...")
 
@@ -853,9 +603,6 @@ def create_column_lineage(postgres_assets: List, snowflake_assets: List):
                     sf_col_name, sf_col_qualified_name = matching_sf_cols[0]
 
                     try:
-                        # Import Column class
-                        from pyatlan.model.assets import Column
-
                         # Create column-level lineage process
                         process = Process.creator(
                             name=f"Column Mapping: {table_name}.{pg_col_name}",
@@ -886,14 +633,14 @@ def create_column_lineage(postgres_assets: List, snowflake_assets: List):
 
 
 if __name__ == "__main__":
-    # Test the integration
+    
     if ATLAN_API_TOKEN:
-        
-        # ------- Gets all assets -------
-        # Show cache status first
+        # Show cache status
         logger.info("📊 Cache Status Check:")
         get_cache_status()
 
+        # -------- Get all assets once ------------
+        logger.info("🔍 Fetching assets from Atlan...")
         postgres_assets = find_postgres_assets()
         logger.info(f"Found {len(postgres_assets)} PostgreSQL assets")
 
@@ -901,9 +648,10 @@ if __name__ == "__main__":
         logger.info(f"Found {len(snowflake_assets)} Snowflake assets")
 
         # List S3 bucket objects
-        list_s3_bucket_objects(bucket_name="atlan-tech-challenge")
+        s3_files = list_s3_bucket_objects()
 
-        #------- Run complete S3 integration workflow
+        # ------ Run S3 integration workflow --------
+        logger.info("🚀 Running S3 integration workflow...")
         s3_integration_result = integration_with_S3()
 
         if s3_integration_result:
@@ -911,26 +659,26 @@ if __name__ == "__main__":
             logger.info(f"   Connection: {s3_integration_result['connection_qualified_name']}")
             logger.info(f"   Bucket: {s3_integration_result['bucket_qualified_name']}")
             logger.info(f"   Objects Created/Updated: {s3_integration_result['object_count']}")
-        
-        #------- Does lineage integration -------
-        logger.info("🔗 Creating lineage between PostgreSQL → S3 → Snowflake...")
 
-        # Get all assets
-        postgres_assets = find_postgres_assets()
-        snowflake_assets = find_snowflake_assets()
+            # Create lineage connections
+            logger.info("🔗 Creating lineage between PostgreSQL → S3 → Snowflake...")
 
-        # Create table-level lineage connections
-        create_table_lineage(
-            postgres_assets=postgres_assets,
-            s3_objects=s3_integration_result['s3_objects'] if s3_integration_result else [],
-            snowflake_assets=snowflake_assets
-        )
+            # Create table-level lineage
+            create_table_lineage(
+                postgres_assets=postgres_assets,
+                s3_objects=s3_integration_result['s3_objects'],
+                snowflake_assets=snowflake_assets
+            )
 
-        # Create column-level lineage connections
-        create_column_lineage(
-            postgres_assets=postgres_assets,
-            snowflake_assets=snowflake_assets
-        )
+            # Create column-level lineage
+            create_column_lineage(
+                postgres_assets=postgres_assets,
+                snowflake_assets=snowflake_assets
+            )
+
+            logger.info("✅ Complete data lineage pipeline established successfully!")
+        else:
+            logger.error("❌ S3 integration failed. Cannot proceed with lineage creation.")
 
     else:
         print("❌ ATLAN_API_TOKEN not found. Please set your API token in .env file.")
