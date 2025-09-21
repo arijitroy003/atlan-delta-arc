@@ -723,12 +723,12 @@ def create_s3_to_snowflake_lineage(s3_objects: List[S3Object], snowflake_tables:
                 logger.error(f"❌ Error creating S3→Snowflake lineage: {e}")
 
 
-def create_complete_lineage(postgres_assets: List, s3_objects: List, snowflake_assets: List):
+def create_table_lineage(postgres_assets: List, s3_objects: List, snowflake_assets: List):
     """
-    Create complete lineage: PostgreSQL → S3 → Snowflake
+    Create table-level lineage: PostgreSQL → S3 → Snowflake
     Based on https://developer.atlan.com/snippets/common-examples/lineage/manage/#create-lineage-between-assets
     """
-    logger.info("🔗 Starting complete lineage creation...")
+    logger.info("🔗 Starting table-level lineage creation...")
 
     # Filter to get only tables from postgres and snowflake assets
     postgres_tables = [asset for asset in postgres_assets if len(asset) >= 3 and asset[2] == 'Table']
@@ -781,8 +781,8 @@ def create_complete_lineage(postgres_assets: List, s3_objects: List, snowflake_a
                 process.source_url = "https://atlan-tech-challenge.s3.amazonaws.com"
 
                 # Save the process
-                response = client.asset.save(process)
-                logger.info(f"✅ Created lineage process: {postgres_table_name}")
+                client.asset.save(process)
+                logger.info(f"✅ Created table lineage process: {postgres_table_name}")
                 logger.info(f"   📊 PostgreSQL: {postgres_qualified_name}")
                 logger.info(f"   📦 S3: {s3_object.qualified_name}")
                 logger.info(f"   ❄️ Snowflake: {snowflake_qualified_name}")
@@ -790,30 +790,120 @@ def create_complete_lineage(postgres_assets: List, s3_objects: List, snowflake_a
                 lineage_count += 1
 
             except Exception as e:
-                logger.error(f"❌ Error creating lineage for {postgres_table_name}: {e}")
+                logger.error(f"❌ Error creating table lineage for {postgres_table_name}: {e}")
 
-    logger.info(f"🎉 Lineage creation completed! Created {lineage_count} lineage processes.")
+    logger.info(f"🎉 Table lineage creation completed! Created {lineage_count} lineage processes.")
+
+
+def create_column_lineage(postgres_assets: List, snowflake_assets: List):
+    """
+    Create column-level lineage: PostgreSQL columns → Snowflake columns
+    Maps individual columns between matching tables
+    """
+    logger.info("🔗 Starting column-level lineage creation...")
+
+    # Filter to get only columns from postgres and snowflake assets
+    postgres_columns = [asset for asset in postgres_assets if len(asset) >= 3 and asset[2] == 'Column']
+    snowflake_columns = [asset for asset in snowflake_assets if len(asset) >= 3 and asset[2] == 'Column']
+
+    logger.info(f"📊 Found {len(postgres_columns)} PostgreSQL columns")
+    logger.info(f"❄️ Found {len(snowflake_columns)} Snowflake columns")
+
+    # Group columns by table name for easier matching
+    postgres_cols_by_table = {}
+    snowflake_cols_by_table = {}
+
+    for col in postgres_columns:
+        # Extract table name from qualified name (e.g., .../CUSTOMERS/CUSTOMERID -> CUSTOMERS)
+        table_name = col[0].split('/')[-2].upper()
+        column_name = col[1].upper()
+        if table_name not in postgres_cols_by_table:
+            postgres_cols_by_table[table_name] = []
+        postgres_cols_by_table[table_name].append((column_name, col[0]))
+
+    for col in snowflake_columns:
+        # Extract table name from qualified name
+        table_name = col[0].split('/')[-2].upper()
+        column_name = col[1].upper()
+        if table_name not in snowflake_cols_by_table:
+            snowflake_cols_by_table[table_name] = []
+        snowflake_cols_by_table[table_name].append((column_name, col[0]))
+
+    # Create column lineage for matching tables
+    column_lineage_count = 0
+    for table_name in postgres_cols_by_table:
+        if table_name in snowflake_cols_by_table:
+            postgres_cols = postgres_cols_by_table[table_name]
+            snowflake_cols = snowflake_cols_by_table[table_name]
+
+            logger.info(f"📋 Processing column lineage for table: {table_name}")
+            logger.info(f"   📊 PostgreSQL columns: {len(postgres_cols)}")
+            logger.info(f"   ❄️ Snowflake columns: {len(snowflake_cols)}")
+
+            # Match columns by name and create lineage
+            for pg_col_name, pg_col_qualified_name in postgres_cols:
+                # Find matching Snowflake column
+                matching_sf_cols = [
+                    (sf_col_name, sf_col_qualified_name)
+                    for sf_col_name, sf_col_qualified_name in snowflake_cols
+                    if sf_col_name == pg_col_name
+                ]
+
+                if matching_sf_cols:
+                    sf_col_name, sf_col_qualified_name = matching_sf_cols[0]
+
+                    try:
+                        # Import Column class
+                        from pyatlan.model.assets import Column
+
+                        # Create column-level lineage process
+                        process = Process.creator(
+                            name=f"Column Mapping: {table_name}.{pg_col_name}",
+                            connection_qualified_name="default/s3/1758470378",  # Use S3 connection
+                            process_id=f"col_mapping_{table_name.lower()}_{pg_col_name.lower()}",
+                            inputs=[
+                                Column.ref_by_qualified_name(qualified_name=pg_col_qualified_name)
+                            ],
+                            outputs=[
+                                Column.ref_by_qualified_name(qualified_name=sf_col_qualified_name)
+                            ]
+                        )
+
+                        # Add process metadata
+                        process.description = f"Column mapping: PostgreSQL {table_name}.{pg_col_name} → Snowflake {table_name}.{sf_col_name}"
+                        process.sql = f"-- Column-level ETL for {table_name}.{pg_col_name}"
+
+                        # Save the process
+                        client.asset.save(process)
+                        logger.info(f"✅ Created column lineage: {table_name}.{pg_col_name}")
+
+                        column_lineage_count += 1
+
+                    except Exception as e:
+                        logger.error(f"❌ Error creating column lineage for {table_name}.{pg_col_name}: {e}")
+
+    logger.info(f"🎉 Column lineage creation completed! Created {column_lineage_count} column lineage processes.")
 
 
 if __name__ == "__main__":
     # Test the integration
     if ATLAN_API_TOKEN:
         
-        #------- Gets all assets -------
+        # ------- Gets all assets -------
         # Show cache status first
-        # logger.info("📊 Cache Status Check:")
-        # get_cache_status()
+        logger.info("📊 Cache Status Check:")
+        get_cache_status()
 
-        # postgres_assets = find_postgres_assets()
-        # logger.info(f"Found {len(postgres_assets)} PostgreSQL assets")
+        postgres_assets = find_postgres_assets()
+        logger.info(f"Found {len(postgres_assets)} PostgreSQL assets")
 
-        # snowflake_assets = find_snowflake_assets()
-        # logger.info(f"Found {len(snowflake_assets)} Snowflake assets")
+        snowflake_assets = find_snowflake_assets()
+        logger.info(f"Found {len(snowflake_assets)} Snowflake assets")
 
         # List S3 bucket objects
         list_s3_bucket_objects(bucket_name="atlan-tech-challenge")
 
-        # Run complete S3 integration workflow
+        #------- Run complete S3 integration workflow
         s3_integration_result = integration_with_S3()
 
         if s3_integration_result:
@@ -822,8 +912,6 @@ if __name__ == "__main__":
             logger.info(f"   Bucket: {s3_integration_result['bucket_qualified_name']}")
             logger.info(f"   Objects Created/Updated: {s3_integration_result['object_count']}")
         
-
-
         #------- Does lineage integration -------
         logger.info("🔗 Creating lineage between PostgreSQL → S3 → Snowflake...")
 
@@ -831,21 +919,18 @@ if __name__ == "__main__":
         postgres_assets = find_postgres_assets()
         snowflake_assets = find_snowflake_assets()
 
-        # Create lineage connections
-        create_complete_lineage(
+        # Create table-level lineage connections
+        create_table_lineage(
             postgres_assets=postgres_assets,
             s3_objects=s3_integration_result['s3_objects'] if s3_integration_result else [],
             snowflake_assets=snowflake_assets
         )
 
-
-
-
-        # Uncomment to run full lineage integration
-        # integrate_s3_with_lineage()
-
-        
-        
+        # Create column-level lineage connections
+        create_column_lineage(
+            postgres_assets=postgres_assets,
+            snowflake_assets=snowflake_assets
+        )
 
     else:
         print("❌ ATLAN_API_TOKEN not found. Please set your API token in .env file.")
