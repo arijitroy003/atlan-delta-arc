@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 # Cache configuration
 CACHE_EXPIRY_HOURS = 24
-POSTGRES_CACHE_FILE = "postgres_tables_cache.json"
-SNOWFLAKE_CACHE_FILE = "snowflake_tables_cache.json"
+POSTGRES_CACHE_FILE = "postgres_assets_cache.json"
+SNOWFLAKE_CACHE_FILE = "snowflake_assets_cache.json"
 
 
 def clear_all_cache():
@@ -188,19 +188,19 @@ def integrate_s3_with_lineage(s3_bucket_arn: str = "arn:aws:s3:::atlan-tech-chal
             logger.error("❌ Failed to create S3 objects")
             return False
             
-        # Step 4: Find existing PostgreSQL tables
-        postgres_tables = find_postgres_tables()
-        logger.info(f"📊 Found {len(postgres_tables)} PostgreSQL tables")
-        
-        # Step 5: Find existing Snowflake tables  
-        snowflake_tables = find_snowflake_tables()
-        logger.info(f"❄️ Found {len(snowflake_tables)} Snowflake tables")
+        # Step 4: Find existing PostgreSQL assets
+        postgres_assets = find_postgres_assets()
+        logger.info(f"📊 Found {len(postgres_assets)} PostgreSQL assets")
+
+        # Step 5: Find existing Snowflake assets
+        snowflake_assets = find_snowflake_assets()
+        logger.info(f"❄️ Found {len(snowflake_assets)} Snowflake assets")
         
         # Step 6: Create PostgreSQL → S3 lineage
-        create_postgres_to_s3_lineage(postgres_tables, s3_objects)
-        
+        create_postgres_to_s3_lineage(postgres_assets, s3_objects)
+
         # Step 7: Create S3 → Snowflake lineage
-        create_s3_to_snowflake_lineage(s3_objects, snowflake_tables)
+        create_s3_to_snowflake_lineage(s3_objects, snowflake_assets)
         
         logger.info("✅ S3 integration with complete lineage established successfully!")
         return True
@@ -405,19 +405,19 @@ def find_postgres_assets(force_refresh: bool = False) -> List[Table]:
     return postgres_assets
 
 
-def find_snowflake_tables(force_refresh: bool = False) -> List[Table]:
+def find_snowflake_assets(force_refresh: bool = False) -> List[Table]:
     """
-    Find existing Snowflake tables in Atlan for connection 'snowflake-ary'
+    Find existing Snowflake assets in Atlan for connection 'snowflake-ary'
     Enhanced with caching to avoid repeated API calls
     """
     # Check cache first unless force refresh is requested
     if not force_refresh and is_cache_valid(SNOWFLAKE_CACHE_FILE):
         cache_data = load_cache_from_file(SNOWFLAKE_CACHE_FILE)
         if cache_data and 'data' in cache_data:
-            logger.info(f"❄️ Using cached Snowflake tables ({len(cache_data['data'])} items)")
+            logger.info(f"❄️ Using cached Snowflake assets ({len(cache_data['data'])} items)")
             return cache_data['data']
 
-    logger.info("❄️ Fetching Snowflake tables from API...")
+    logger.info("❄️ Fetching Snowflake assets from API...")
     snowflake_ary_qualified_name = get_connection_qualified_name(
             connection_name="snowflake-ary",
             connection_type=AtlanConnectorType.SNOWFLAKE,
@@ -431,14 +431,16 @@ def find_snowflake_tables(force_refresh: bool = False) -> List[Table]:
             # Search for all assets and filter by qualified name prefix
             search_request = (
                 FluentSearch()
-                .where(Asset.TYPE_NAME.eq("Table"))
-                .page_size(50)  # Use smaller page size for better performance
+                .where(Asset.QUALIFIED_NAME.startswith(snowflake_ary_qualified_name))
+                .include_on_results(Asset.QUALIFIED_NAME)
+                .include_on_results(Asset.NAME)
+                .include_on_results(Asset.TYPE_NAME)
             ).to_request()
 
             response = client.asset.search(search_request)
 
             # Iterate through all pages of results
-            logger.info("❄️ Iterating through all pages of Snowflake table results...")
+            logger.info("❄️ Iterating through all pages of Snowflake assets results...")
             total_processed = 0
 
             for asset in response:  # This iterates through all pages automatically
@@ -446,16 +448,15 @@ def find_snowflake_tables(force_refresh: bool = False) -> List[Table]:
 
                 # Filter for assets that belong to snowflake-ary connection
                 if (asset.qualified_name and
-                    asset.qualified_name.startswith(f"{snowflake_ary_qualified_name}/") and
-                    isinstance(asset, Table)):
+                    asset.qualified_name.startswith(f"{snowflake_ary_qualified_name}/")):
                     snowflake_assets.append([asset.qualified_name, asset.name, asset.type_name])
 
                 # Log progress every 100 assets
                 if total_processed % 100 == 0:
-                    logger.info(f"❄️ Processed {total_processed} assets, found {len(snowflake_assets)} Snowflake tables so far...")
+                    logger.info(f"❄️ Processed {total_processed} assets, found {len(snowflake_assets)} Snowflake assets so far...")
 
             logger.info(f"❄️ Completed search: processed {total_processed} total assets")
-            logger.info(f"❄️ Found {len(snowflake_assets)} tables in snowflake-ary connection:")
+            logger.info(f"❄️ Found {len(snowflake_assets)} assets in snowflake-ary connection:")
             for asset in snowflake_assets:
                 logger.info(f"  🔹 {asset[1]} (Type: {asset[2]}, Qualified Name: {asset[0]})")
 
@@ -564,8 +565,11 @@ if __name__ == "__main__":
         # logger.info("\n📊 Final Cache Status:")
         # get_cache_status()
 
-        postgres_tables = find_postgres_assets(force_refresh=True)
-        logger.info(f"Found {len(postgres_tables)} PostgreSQL tables")
+        postgres_assets = find_postgres_assets(force_refresh=True)
+        logger.info(f"Found {len(postgres_assets)} PostgreSQL assets")
+
+        snowflake_assets = find_snowflake_assets(force_refresh=True)
+        logger.info(f"Found {len(snowflake_assets)} Snowflake assets")
 
 
 
