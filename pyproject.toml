@@ -1,0 +1,9 @@
+[project]
+name = "atlan-delta-arc"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.34.0",
+    "pyatlan>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
