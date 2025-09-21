@@ -11,13 +11,30 @@ This project implements a complete data lineage pipeline that:
 - **Intelligent Caching**: Implements local JSON caching to reduce API calls and improve performance
 - **Comprehensive Logging**: Provides detailed progress tracking with emoji-enhanced logging
 
+
+## Current State Analysis
+
+### Existing Architecture
+```
+[PostgreSQL] ─── Native ─── [Atlan]
+     │
+     ▼
+   [S3] ────────── ❌ GAP ─────
+     │
+     ▼
+[Snowflake] ──── Native ─── [Atlan]
+     │
+     ▼
+  [Looker] ───── Native ─── [Atlan]
+```
+
 ## 📊 Architecture
 
 ```
 PostgreSQL (Source) → S3 (Staging) → Snowflake (Destination)
       ↓                    ↓                  ↓
-   8 Tables            8 Objects           8 Tables
-   41 Columns             CSV              41 Columns
+    Tables              Objects             Tables
+    Columns               CSV               Columns
       ↓                    ↓                  ↓
    [Table Lineage Processes & Column Lineage Processes]
 ```
@@ -79,14 +96,14 @@ ATLAN_BASE_URL=https://your-tenant.atlan.com
 ATLAN_API_TOKEN=your_api_token_here
 
 # Database Connection Names
-POSTGRES_CONNECTION_NAME=postgres-ary
-SNOWFLAKE_CONNECTION_NAME=snowflake-ary
+POSTGRES_CONNECTION_NAME=your-postgres-connection-name
+SNOWFLAKE_CONNECTION_NAME=your-snowflake-connection-name
 
 # S3 Configuration
-S3_BUCKET_NAME=atlan-tech-challenge
-S3_BUCKET_ARN=arn:aws:s3:::atlan-tech-challenge
-S3_CONNECTION_NAME=aws-s3-connection-ary-test
-S3_PREFIX=2025/csa-tech-challenge-ary/
+S3_BUCKET_NAME=your-s3-bucket-name
+S3_BUCKET_ARN=arn:aws:s3:::your-s3-bucket-name
+S3_CONNECTION_NAME=your-s3-connection-name
+S3_PREFIX=your/s3/prefix/path/
 
 # Cache Configuration
 CACHE_EXPIRY_HOURS=24
@@ -178,8 +195,8 @@ The pipeline creates two cache files:
   "timestamp": "2024-01-15T10:30:00.000000",
   "data": [
     ["qualified_name", "asset_name", "asset_type"],
-    ["default/postgres/1757530687/DEMO_DB/PUBLIC/CUSTOMERS", "CUSTOMERS", "Table"],
-    ["default/postgres/1757530687/DEMO_DB/PUBLIC/CUSTOMERS/CUSTOMERID", "CUSTOMERID", "Column"]
+    ["default/postgres/17575xxxx/DEMO_DB/PUBLIC/CUSTOMERS", "CUSTOMERS", "Table"],
+    ["default/postgres/175753xxxx/DEMO_DB/PUBLIC/CUSTOMERS/CUSTOMERID", "CUSTOMERID", "Column"]
   ]
 }
 ```
@@ -190,8 +207,8 @@ The pipeline creates two cache files:
   "timestamp": "2024-01-15T10:30:00.000000",
   "data": [
     ["qualified_name", "asset_name", "asset_type"],
-    ["default/snowflake/1757530705/DEMO_DB/PUBLIC/CUSTOMERS", "CUSTOMERS", "Table"],
-    ["default/snowflake/1757530705/DEMO_DB/PUBLIC/CUSTOMERS/CUSTOMERID", "CUSTOMERID", "Column"]
+    ["default/snowflake/175xxxx/DEMO_DB/PUBLIC/CUSTOMERS", "CUSTOMERS", "Table"],
+    ["default/snowflake/175xxxx/DEMO_DB/PUBLIC/CUSTOMERS/CUSTOMERID", "CUSTOMERID", "Column"]
   ]
 }
 ```
