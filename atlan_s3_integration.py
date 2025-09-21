@@ -6,7 +6,7 @@ Atlan CSA Challenge Solution
 This script integrates S3 assets into Atlan's metadata platform and establishes
 lineage between PostgreSQL → S3 → Snowflake for Delta Arc Corp's data pipeline.
 
-Author: Arijit Roy (AR)
+Author: Arijit Roy (ary)
 """
 
 import os
@@ -39,7 +39,7 @@ class S3AssetInfo:
 class AtlanS3Integrator:
     """Main class for S3 integration with Atlan platform"""
 
-    def __init__(self, base_url: str, api_token: str, initials: str = "AR"):
+    def __init__(self, base_url: str, api_token: str, initials: str = "ary"):
         """
         Initialize the S3 integrator
 
@@ -68,7 +68,7 @@ class AtlanS3Integrator:
 
             # Create new S3 connection
             connection = Connection.creator(
-                name=f"S3-DeltaArc-{self.initials}",
+                name=f"S3-DeltaArc-tech-ary-{self.initials}",
                 connector_type=AtlanConnectorType.S3
             ).build()
 
