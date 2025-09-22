@@ -23,7 +23,7 @@
 ### Current Data Pipeline
 ```
 PostgreSQL ──→ S3 ──→ Snowflake ──→ Looker
-    ✅            ❌         ✅           ✅
+    ✅         ❌         ✅           ✅
  Connected    GAP!    Connected   Connected
 ```
 
@@ -58,7 +58,7 @@ PostgreSQL ──→ S3 ──→ Snowflake ──→ Looker
        ▼                 ▼                ▼
 ┌──────────────────────────────────────────────────┐
 │           Atlan Metadata Platform                │
-│        🔗 Complete Lineage Graph 🔗             │
+│        🔗 Complete Lineage Graph 🔗              │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -331,9 +331,9 @@ PostgreSQL ──→ S3 ──→ Snowflake ──→ Looker
 **Ready to bridge the metadata gap and unlock complete pipeline visibility?**
 
 **Contact Information:**
-- **Arij Roy** - Customer Solutions Architect
-- **Email:** arij.roy@atlan.com
-- **Slack:** @arij.roy
+- **Arijit Roy** - Customer Solutions Architect
+- **Email:** arijit.roy@atlan.com
+- **Slack:** @arijit.roy
 
 **Next Meeting:** Technical deep-dive with engineering team
 **Proposed Date:** Next week
